@@ -11,7 +11,7 @@ offers a streamlined API for handling SSE streams.
   automatically (configurable).
 * **Event Filtering:** Listen to specific event types or all events.
 * **Error Handling:** Provides mechanisms for handling connection errors and stream errors.
-* **Graceful Shu[README.md](README.md)tdown:** Allows for proper disposal of resources.
+* **Graceful Shutdown:** Allows for proper disposal of resources.
 * **Customizable Headers:** Easily add custom headers to your SSE requests.
 
 ## Getting started
@@ -32,6 +32,8 @@ Future<void> main() async {
   await sse.dispose();
 }
 ```
+
+## Publishing
 
 ```shell
 TAG="v1.0.0" && git push origin --delete $TAG || true && git tag -f $TAG && git push origin $TAG
