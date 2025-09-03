@@ -1,39 +1,34 @@
-<!-- 
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
+This package provides a simple and efficient way to consume Server-Sent Events (SSE) in your Dart
+and Flutter applications.
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/tools/pub/writing-package-pages). 
-
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/guides/libraries/create-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/to/develop-packages). 
--->
-
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
+It leverages the powerful `dio` HTTP client for network requests and
+offers a streamlined API for handling SSE streams.
 
 ## Features
 
-TODO: List what your package can do. Maybe include images, gifs, or videos.
+* **Easy Integration:** Seamlessly integrates with existing `dio` instances.
+* **Automatic Reconnection:** Handles network interruptions and attempts to reconnect
+  automatically (configurable).
+* **Event Filtering:** Listen to specific event types or all events.
+* **Error Handling:** Provides mechanisms for handling connection errors and stream errors.
+* **Graceful Shutdown:** Allows for proper disposal of resources.
+* **Customizable Headers:** Easily add custom headers to your SSE requests.
 
 ## Getting started
 
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
+1. **Add Dependency:**
 
-## Usage
-
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder. 
+   Add `dio_sse` to your `pubspec.yaml` file:
 
 ```dart
-const like = 'sample';
+Future<void> main() async {
+  final dio = Dio();
+  final sse = EventSource.from(dio, url: "https://sse.dev/test");
+  sse.start();
+  sse.onAnyMessage().listen((event) {
+    print(event);
+  });
+  await Future.delayed(Duration(milliseconds: 10000));
+  await sse.dispose();
+}
 ```
-
-## Additional information
-
-TODO: Tell users more about the package: where to find more information, how to 
-contribute to the package, how to file issues, what response they can expect 
-from the package authors, and more.

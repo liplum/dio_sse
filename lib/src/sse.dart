@@ -54,7 +54,14 @@ StreamTransformer<Uint8List, List<int>> _unit8Transformer = StreamTransformer.fr
   },
 );
 
-typedef EventSourceRequest = Future<Response<ResponseBody>> Function({required CancelToken cancelToken});
+typedef EventSourceRequest =
+    Future<Response<ResponseBody>> Function({
+      required CancelToken cancelToken,
+      required ResponseType responseType,
+      required Map<String, String> headers,
+    });
+
+const _sseHeaders = {"Accept": "text/event-stream", "Cache-Control": "no-cache"};
 
 class EventSource {
   final _messages = StreamController<EventPack>.broadcast();
@@ -79,7 +86,11 @@ class EventSource {
     Map<String, dynamic>? queryParameters,
     Object? data,
   }) {
-    return ({required CancelToken cancelToken}) async {
+    return ({
+      required CancelToken cancelToken,
+      required ResponseType responseType,
+      required Map<String, String> headers,
+    }) async {
       final former = options ?? Options();
       return await dio.request<ResponseBody>(
         url,
@@ -88,12 +99,8 @@ class EventSource {
         data: data,
         options: former.copyWith(
           method: former.method,
-          headers: {
-            if (former.headers != null) ...former.headers!,
-            "Accept": "text/event-stream",
-            "Cache-Control": "no-cache",
-          },
-          responseType: ResponseType.stream,
+          headers: {...?former.headers, ...headers},
+          responseType: responseType,
         ),
       );
     };
@@ -132,7 +139,7 @@ class EventSource {
     cancelToken = _cancelToken = CancelToken();
     _log(_LogCat.info, 'Connection Initiated');
     try {
-      final response = await request(cancelToken: cancelToken);
+      final response = await request(cancelToken: cancelToken, responseType: ResponseType.stream, headers: _sseHeaders);
       _log(_LogCat.info, 'Connected: ${response.statusCode.toString()}');
 
       _connected = true;
