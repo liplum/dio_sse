@@ -1,7 +1,7 @@
 name: dio_sse
 description: "Server sent event built on top of dio."
-version: 1.0.0
-homepage:
+version: 2.0.0
+homepage: https://github.com/liplum/dio_sse
 
 environment:
   sdk: ^3.9.0
