@@ -1,8 +1,3 @@
-import 'package:json_annotation/json_annotation.dart';
-
-part 'pack.g.dart';
-
-@JsonSerializable(explicitToJson: true)
 class EventPack {
   final String id;
   final String event;
@@ -12,12 +7,13 @@ class EventPack {
 
   @override
   String toString() {
-    return "$id $event $data";
+    return "#$id [$event]: $data";
   }
 
-  Map<String, dynamic> toJson() => _$EventPackToJson(this);
+  Map<String, dynamic> toJson() => {'id': id, 'event': event, 'data': data};
 
-  factory EventPack.fromJson(Map<String, dynamic> json) => _$EventPackFromJson(json);
+  factory EventPack.fromJson(Map<String, dynamic> json) =>
+      EventPack(id: json['id'] as String, event: json['event'] as String, data: json['data'] as String);
 
   @override
   bool operator ==(Object other) {

@@ -26,15 +26,6 @@ enum _LogCat {
   const _LogCat(this.label);
 }
 
-/// Enum to define the type of HTTP connection to be used in EventSource.
-///
-/// - `get`: Use an HTTP GET request for the connection. This is typically used
-///   for retrieving data from a server without modifying any server-side state.
-/// - `post`: Use an HTTP POST request. This is commonly used for submitting data
-///   to be processed to a server, which may result in a change in server-side state
-///   or data being stored.
-enum EventSourceMethod { get, post }
-
 final _lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
 
 /// Reconnect configuration for the client.
@@ -48,12 +39,12 @@ class EventSourceOptions {
   final Duration reconnectionInterval;
 
   /// -1 means unlimited.
-  final int reconnectionAttempts;
+  final int maxReconnectionAttempts;
 
   const EventSourceOptions({
     this.logReceivedData = false,
     this.reconnectionInterval = const Duration(seconds: 15),
-    this.reconnectionAttempts = 5,
+    this.maxReconnectionAttempts = 5,
   });
 }
 
@@ -63,12 +54,12 @@ StreamTransformer<Uint8List, List<int>> _unit8Transformer = StreamTransformer.fr
   },
 );
 
-typedef RequestCallback = Future<Response<ResponseBody>> Function({required CancelToken cancelToken});
+typedef EventSourceRequest = Future<Response<ResponseBody>> Function({required CancelToken cancelToken});
 
 class EventSource {
   final _messages = StreamController<EventPack>.broadcast();
   final _errors = StreamController<EventSourceException>.broadcast();
-  final RequestCallback request;
+  final EventSourceRequest request;
   final EventSourceOptions options;
   var _connected = false;
   bool _disposed = false;
@@ -81,7 +72,7 @@ class EventSource {
 
   CancelToken? _cancelToken;
 
-  static RequestCallback asCallback(
+  static EventSourceRequest toCallback(
     Dio dio, {
     required String url,
     Options? options,
@@ -106,6 +97,20 @@ class EventSource {
         ),
       );
     };
+  }
+
+  static EventSource from(
+    Dio dio, {
+    required String url,
+    EventSourceOptions sseOptions = const EventSourceOptions(),
+    Options? options,
+    Map<String, dynamic>? queryParameters,
+    Object? data,
+  }) {
+    return EventSource(
+      options: sseOptions,
+      request: toCallback(dio, url: url, options: options, queryParameters: queryParameters, data: data),
+    );
   }
 
   Future<void> start() async {
@@ -260,8 +265,8 @@ class EventSource {
 
     /// If the maximum attempts is -1, it means there is no limit to the number of attempts.
 
-    if (options.reconnectionAttempts >= 0) {
-      if (_maxAttempts >= options.reconnectionAttempts) {
+    if (options.maxReconnectionAttempts >= 0) {
+      if (_maxAttempts >= options.maxReconnectionAttempts) {
         await _stop();
         return;
       }
