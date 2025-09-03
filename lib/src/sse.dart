@@ -306,12 +306,11 @@ class EventSource {
       _connected = false;
       if (error is DioException) {
         final data = error.response?.data;
-        final exception = EventSourceException(
+        _addException(EventSourceException(
           statusCode: error.response?.statusCode,
           reason: error.response?.statusMessage,
           message: "${data is ResponseBody ? await _streamToString(data.stream) : data}",
-        );
-        _addException(exception);
+        ));
       } else {
         _addException(EventSourceException(message: error.toString()));
       }
