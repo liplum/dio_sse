@@ -55,7 +55,7 @@ StreamTransformer<Uint8List, List<int>> _unit8Transformer = StreamTransformer.fr
 );
 
 typedef EventSourceRequest =
-    Future<Response<ResponseBody>> Function({
+    Future<Response> Function({
       required CancelToken cancelToken,
       required ResponseType responseType,
       required Map<String, String> headers,
@@ -141,11 +141,12 @@ class EventSource {
     try {
       final response = await request(cancelToken: cancelToken, responseType: ResponseType.stream, headers: _sseHeaders);
       _log(_LogCat.info, 'Connected: ${response.statusCode.toString()}');
-
+      final data = response.data;
+      final body = data as ResponseBody;
       _connected = true;
 
       var curPack = _EventPackBuilder();
-      _streamSubscription = response.data?.stream
+      _streamSubscription = body.stream
           .transform(_unit8Transformer)
           .transform(const Utf8Decoder())
           .transform(const LineSplitter())
