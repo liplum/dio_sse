@@ -1,15 +1,14 @@
 name: dio_sse
-description: A starting point for Dart libraries or applications.
+description: A dio transformer for Server-Sent Events(SSE). It can transform a SSE stream into a series of dio Responses.
 version: 2.1.0
-# repository: https://github.com/my_org/my_repo
+repository: https://github.com/liplum/dio_sse
 
 environment:
   sdk: ^3.9.0
 
-# Add regular dependencies here.
 dependencies:
   dio: ^5.9.0
-  # path: ^1.9.0
+  web: ^1.1.1
 
 dev_dependencies:
   lints: ^6.0.0
