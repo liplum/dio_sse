@@ -102,6 +102,63 @@ data:
       },
     );
 
+    test('parses fields and line endings split across chunks', () async {
+      final source = _eventSourceFromChunks([
+        [0xEF],
+        [0xBB, 0xBF],
+        utf8.encode('id: '),
+        utf8.encode('split'),
+        utf8.encode('\r'),
+        utf8.encode('\ndata: hel'),
+        utf8.encode('lo\r'),
+        utf8.encode('\nevent: cu'),
+        utf8.encode('stom\r\n'),
+        utf8.encode('\r'),
+        utf8.encode('\n'),
+      ]);
+
+      final event = source.onAnyMessage().first;
+      await source.start();
+
+      expect(
+        await event,
+        const EventPack(id: 'split', event: 'custom', data: 'hello'),
+      );
+
+      await source.dispose();
+    });
+
+    test('keeps split multibyte UTF-8 characters intact', () async {
+      final bytes = utf8.encode('data: 你好\n\n');
+      final source = _eventSourceFromChunks([
+        bytes.sublist(0, 8),
+        bytes.sublist(8, 10),
+        bytes.sublist(10),
+      ]);
+
+      final event = source.onAnyMessage().first;
+      await source.start();
+
+      expect(await event, const EventPack(id: '', event: '', data: '你好'));
+
+      await source.dispose();
+    });
+
+    test('replaces malformed UTF-8 instead of closing the stream', () async {
+      final source = _eventSourceFromChunks([
+        utf8.encode('data: '),
+        [0xC3, 0x28],
+        utf8.encode('\n\n'),
+      ]);
+
+      final event = source.onAnyMessage().first;
+      await source.start();
+
+      expect(await event, const EventPack(id: '', event: '', data: '�('));
+
+      await source.dispose();
+    });
+
     test('ignores id fields containing null characters', () async {
       final source = _eventSourceFromText('''
 id: good
@@ -394,7 +451,7 @@ data: second
 
       expect(await messages, [
         const EventPack(id: '42', event: '', data: 'first'),
-        const EventPack(id: '', event: '', data: 'second'),
+        const EventPack(id: '42', event: '', data: 'second'),
       ]);
       expect(requestHeaders.first, isNot(contains('Last-Event-ID')));
       expect(requestHeaders.last['Last-Event-ID'], '42');
@@ -402,6 +459,66 @@ data: second
       await source.dispose();
       await activeStream.close();
     });
+
+    test(
+      'carries last event id across reconnect messages without id',
+      () async {
+        var requests = 0;
+        final activeStream = StreamController<Uint8List>();
+        final source = EventSource(
+          options: const EventSourceOptions(
+            reconnectionInterval: Duration.zero,
+            maxReconnectionAttempts: 1,
+          ),
+          request:
+              ({
+                required cancelToken,
+                required responseType,
+                required headers,
+              }) async {
+                requests++;
+                if (requests == 1) {
+                  return Response<ResponseBody>(
+                    requestOptions: RequestOptions(path: '/events'),
+                    statusCode: 200,
+                    data: ResponseBody(
+                      Stream.value(utf8.encode('id: 42\ndata: first\n\n')),
+                      200,
+                      headers: {
+                        'content-type': ['text/event-stream'],
+                      },
+                    ),
+                  );
+                }
+
+                return Response<ResponseBody>(
+                  requestOptions: RequestOptions(path: '/events'),
+                  statusCode: 200,
+                  data: ResponseBody(
+                    activeStream.stream,
+                    200,
+                    headers: {
+                      'content-type': ['text/event-stream'],
+                    },
+                  ),
+                );
+              },
+        );
+
+        final messages = source.onAnyMessage().take(2).toList();
+        await source.start();
+        await _waitFor(() => requests == 2);
+        activeStream.add(utf8.encode('data: second\n\n'));
+
+        expect(await messages, [
+          const EventPack(id: '42', event: '', data: 'first'),
+          const EventPack(id: '42', event: '', data: 'second'),
+        ]);
+
+        await source.dispose();
+        await activeStream.close();
+      },
+    );
 
     test('updates reconnection interval from retry field', () async {
       var requests = 0;
@@ -451,6 +568,24 @@ data: second
 
       await source.dispose();
       await activeStream.close();
+    });
+
+    test('ignores overflow retry values without closing the stream', () async {
+      final source = _eventSourceFromText('''
+retry: 999999999999999999999999999999999999999999999999999999
+data: still open
+
+''');
+
+      final event = source.onAnyMessage().first;
+      await source.start();
+
+      expect(
+        await event,
+        const EventPack(id: '', event: '', data: 'still open'),
+      );
+
+      await source.dispose();
     });
 
     test('ignores stale responses after a newer start', () async {
@@ -524,6 +659,10 @@ Future<void> _waitFor(bool Function() condition) async {
 }
 
 EventSource _eventSourceFromText(String text) {
+  return _eventSourceFromChunks([utf8.encode(text)]);
+}
+
+EventSource _eventSourceFromChunks(List<List<int>> chunks) {
   return EventSource(
     options: const EventSourceOptions(maxReconnectionAttempts: 0),
     request:
@@ -536,7 +675,7 @@ EventSource _eventSourceFromText(String text) {
             requestOptions: RequestOptions(path: '/events'),
             statusCode: 200,
             data: ResponseBody(
-              Stream.value(utf8.encode(text)),
+              Stream.fromIterable(chunks.map(Uint8List.fromList)),
               200,
               headers: {
                 'content-type': ['text/event-stream'],

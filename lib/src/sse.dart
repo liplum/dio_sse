@@ -236,10 +236,10 @@ class EventSource {
       _connected = true;
 
       var curPack = _EventPackBuilder();
-      var lastEventIdBuffer = '';
+      var lastEventIdBuffer = _lastEventId;
       _streamSubscription = body.stream
           .transform(_uint8Transformer)
-          .transform(const Utf8Decoder())
+          .transform(const Utf8Decoder(allowMalformed: true))
           .transform(_sseLineSplitter())
           .listen(
             (dataLine) {
@@ -288,9 +288,12 @@ class EventSource {
                   break;
                 case 'retry':
                   if (_asciiDigitsRegex.hasMatch(value)) {
-                    _reconnectionInterval = Duration(
-                      milliseconds: int.parse(value),
-                    );
+                    final milliseconds = int.tryParse(value);
+                    if (milliseconds != null) {
+                      _reconnectionInterval = Duration(
+                        milliseconds: milliseconds,
+                      );
+                    }
                   }
                   break;
               }
