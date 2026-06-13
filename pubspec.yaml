@@ -1,6 +1,6 @@
 name: dio_sse
 description: Consume Server-Sent Events streams with Dio, including event filtering, error streams, and configurable reconnection.
-version: 2.1.0
+version: 2.2.0
 repository: https://github.com/liplum/dio_sse
 topics:
   - dio

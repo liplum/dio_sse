@@ -17,7 +17,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dio_sse: ^2.1.0
+  dio_sse: ^2.2.0
 ```
 
 Then create an `EventSource` from a `Dio` instance:
