@@ -12,10 +12,16 @@ class _EventPackBuilder {
   String id = "";
   String event = "";
   String data = "";
+  bool hasData = false;
 
-  bool get hasContent => id.isNotEmpty || event.isNotEmpty || data.isNotEmpty;
+  bool get shouldDispatch => hasData;
 
-  EventPack build() => EventPack(id: id, event: event, data: data);
+  EventPack build() {
+    final normalizedData = data.endsWith('\n')
+        ? data.substring(0, data.length - 1)
+        : data;
+    return EventPack(id: id, event: event, data: normalizedData);
+  }
 }
 
 /// Enum to represent different types of EventSource Log.
@@ -28,8 +34,6 @@ enum _LogCat {
 
   const _LogCat(this.label);
 }
-
-final _lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
 
 /// Reconnection and logging options for [EventSource].
 class EventSourceOptions {
@@ -49,19 +53,18 @@ class EventSourceOptions {
   });
 }
 
-StreamTransformer<Uint8List, List<int>> _unit8Transformer =
-    StreamTransformer.fromHandlers(
-      handleData: (data, sink) {
-        sink.add(List<int>.from(data));
-      },
-    );
-
 typedef EventSourceRequest =
     Future<Response> Function({
       required CancelToken cancelToken,
       required ResponseType responseType,
       required Map<String, String> headers,
     });
+
+final _uint8Transformer = StreamTransformer<Uint8List, List<int>>.fromHandlers(
+  handleData: (data, sink) {
+    sink.add(data);
+  },
+);
 
 const _sseHeaders = {
   "Accept": "text/event-stream",
@@ -76,7 +79,7 @@ class EventSource {
   var _connected = false;
   bool _disposed = false;
   StreamSubscription? _streamSubscription;
-  int _maxAttempts = 0;
+  int _reconnectionAttempts = 0;
 
   bool get connected => _connected;
 
@@ -135,6 +138,7 @@ class EventSource {
   }
 
   Future<void> start() async {
+    _reconnectionAttempts = 0;
     await _start(isReconnection: false);
   }
 
@@ -158,6 +162,21 @@ class EventSource {
         responseType: ResponseType.stream,
         headers: _sseHeaders,
       );
+      if (_disposed || _cancelToken != cancelToken || cancelToken.isCancelled) {
+        return;
+      }
+      if (response.statusCode != null && response.statusCode != 200) {
+        _addException(
+          EventSourceException(
+            statusCode: response.statusCode,
+            reason: response.statusMessage,
+            message: 'Unexpected status code: ${response.statusCode}',
+          ),
+        );
+        await _stop();
+        await _attemptReconnectIfNeeded();
+        return;
+      }
       _log(_LogCat.info, 'Connected: ${response.statusCode.toString()}');
       final data = response.data;
       final body = data as ResponseBody;
@@ -165,41 +184,46 @@ class EventSource {
 
       var curPack = _EventPackBuilder();
       _streamSubscription = body.stream
-          .transform(_unit8Transformer)
+          .transform(_uint8Transformer)
           .transform(const Utf8Decoder())
           .transform(const LineSplitter())
           .listen(
             (dataLine) {
+              if (_disposed) return;
+              _reconnectionAttempts = 0;
               if (dataLine.isEmpty) {
                 /// When the data line is empty, it indicates that the complete event set has been read.
                 /// The event is then added to the stream.
-                if (curPack.hasContent) {
-                  _messages.add(curPack.build());
+                if (curPack.shouldDispatch) {
+                  final pack = curPack.build();
+                  _addMessage(pack);
                   if (options.logReceivedData) {
-                    _log(_LogCat.info, curPack.data.toString());
+                    _log(_LogCat.info, pack.data);
                   }
                 }
                 curPack = _EventPackBuilder();
                 return;
               }
 
-              /// Parsing each line through the regex.
-              Match match = _lineRegex.firstMatch(dataLine)!;
-              var field = match.group(1);
-              if (field!.isEmpty) {
+              final colonIndex = dataLine.indexOf(':');
+              final field = colonIndex == -1
+                  ? dataLine
+                  : dataLine.substring(0, colonIndex);
+              if (field.isEmpty) {
                 return;
               }
-              var value = '';
-              if (field == 'data') {
-                value = match.group(2) ?? '';
-              } else {
-                value = match.group(2) ?? '';
-              }
+              final rawValue = colonIndex == -1
+                  ? ''
+                  : dataLine.substring(colonIndex + 1);
+              final value = rawValue.startsWith(' ')
+                  ? rawValue.substring(1)
+                  : rawValue;
               switch (field) {
                 case 'event':
                   curPack.event = value;
                   break;
                 case 'data':
+                  curPack.hasData = true;
                   curPack.data = '${curPack.data}$value\n';
                   break;
                 case 'id':
@@ -238,6 +262,13 @@ class EventSource {
             },
           );
     } catch (error) {
+      if (_disposed || _cancelToken != cancelToken) {
+        return;
+      }
+      if (error is DioException && CancelToken.isCancel(error)) {
+        await _stop();
+        return;
+      }
       _connected = false;
       if (error is DioException) {
         final data = error.response?.data;
@@ -265,12 +296,17 @@ class EventSource {
     _errors.add(exception);
   }
 
+  void _addMessage(EventPack pack) {
+    if (_disposed) return;
+    _messages.add(pack);
+  }
+
   Future<void> dispose() async {
     if (_disposed) return;
+    _disposed = true;
     await _stop();
     await _errors.close();
     await _messages.close();
-    _disposed = true;
   }
 
   /// Internal method to handle disconnection.
@@ -299,14 +335,14 @@ class EventSource {
     /// If the maximum attempts is -1, it means there is no limit to the number of attempts.
 
     if (options.maxReconnectionAttempts >= 0) {
-      if (_maxAttempts >= options.maxReconnectionAttempts) {
+      if (_reconnectionAttempts >= options.maxReconnectionAttempts) {
         await _stop();
         return;
       }
     }
 
-    /// _maxAttempts is incremented after each attempt.
-    _maxAttempts++;
+    /// _reconnectionAttempts is incremented before each attempt.
+    _reconnectionAttempts++;
 
     // If a reconnectHeader is provided, it is executed to get the header.
 
@@ -323,6 +359,7 @@ class EventSource {
   }
 
   Future<void> reconnect() async {
+    _reconnectionAttempts = 0;
     await _start(isReconnection: true);
   }
 

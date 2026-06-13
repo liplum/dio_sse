@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:dio_sse/dio_sse.dart';
@@ -33,8 +34,8 @@ data: second
       await source.start();
 
       expect(await messages, [
-        const EventPack(id: '1', event: '', data: 'hello\n'),
-        const EventPack(id: '2', event: 'update', data: 'first\nsecond\n'),
+        const EventPack(id: '1', event: '', data: 'hello'),
+        const EventPack(id: '2', event: 'update', data: 'first\nsecond'),
       ]);
 
       await source.dispose();
@@ -55,12 +56,30 @@ data: named
 
       expect(
         await defaultMessage,
-        const EventPack(id: '', event: '', data: 'default\n'),
+        const EventPack(id: '', event: '', data: 'default'),
       );
       expect(
         await customEvent,
-        const EventPack(id: '', event: 'custom', data: 'named\n'),
+        const EventPack(id: '', event: 'custom', data: 'named'),
       );
+
+      await source.dispose();
+    });
+
+    test('does not dispatch id-only or event-only blocks', () async {
+      final source = _eventSourceFromText('''
+id: 1
+
+event: custom
+
+data:
+
+''');
+
+      final message = source.onAnyMessage().first;
+      await source.start();
+
+      expect(await message, const EventPack(id: '', event: '', data: ''));
 
       await source.dispose();
     });
@@ -95,7 +114,185 @@ data: named
 
       await source.dispose();
     });
+
+    test('emits non-200 stream responses as errors', () async {
+      final source = EventSource(
+        options: const EventSourceOptions(maxReconnectionAttempts: 0),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 503,
+                statusMessage: 'Service Unavailable',
+                data: ResponseBody.fromString('unavailable', 503),
+              );
+            },
+      );
+
+      final error = source.onError().first;
+      await source.start();
+
+      final exception = await error;
+      expect(exception.statusCode, 503);
+      expect(exception.message, 'Unexpected status code: 503');
+
+      await source.dispose();
+    });
+
+    test('does not emit cancellation errors after dispose', () async {
+      final requestStarted = Completer<void>();
+      final source = EventSource(
+        options: const EventSourceOptions(maxReconnectionAttempts: 0),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requestStarted.complete();
+              await cancelToken.whenCancel;
+              throw DioException(
+                requestOptions: RequestOptions(path: '/events'),
+                type: DioExceptionType.cancel,
+              );
+            },
+      );
+
+      final start = source.start();
+      await requestStarted.future;
+      await source.dispose();
+
+      await start;
+    });
+
+    test('resets reconnection attempts after receiving stream data', () async {
+      var requests = 0;
+      final activeStream = StreamController<Uint8List>();
+      final source = EventSource(
+        options: const EventSourceOptions(
+          reconnectionInterval: Duration.zero,
+          maxReconnectionAttempts: 1,
+        ),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              if (requests <= 2) {
+                return Response<ResponseBody>(
+                  requestOptions: RequestOptions(path: '/events'),
+                  statusCode: 200,
+                  data: ResponseBody(
+                    Stream.value(utf8.encode('data: $requests\n\n')),
+                    200,
+                    headers: {
+                      'content-type': ['text/event-stream'],
+                    },
+                  ),
+                );
+              }
+
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 200,
+                data: ResponseBody(
+                  activeStream.stream,
+                  200,
+                  headers: {
+                    'content-type': ['text/event-stream'],
+                  },
+                ),
+              );
+            },
+      );
+
+      final messages = source.onAnyMessage().take(2).toList();
+      await source.start();
+
+      expect(await messages, [
+        const EventPack(id: '', event: '', data: '1'),
+        const EventPack(id: '', event: '', data: '2'),
+      ]);
+      await _waitFor(() => requests >= 3);
+
+      await source.dispose();
+      await activeStream.close();
+    });
+
+    test('ignores stale responses after a newer start', () async {
+      var requests = 0;
+      final firstRequest = Completer<Response<ResponseBody>>();
+      final source = EventSource(
+        options: const EventSourceOptions(maxReconnectionAttempts: 0),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              if (requests == 1) {
+                return firstRequest.future;
+              }
+
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 200,
+                data: ResponseBody(
+                  Stream.value(utf8.encode('data: fresh\n\n')),
+                  200,
+                  headers: {
+                    'content-type': ['text/event-stream'],
+                  },
+                ),
+              );
+            },
+      );
+
+      final messages = source.onAnyMessage().take(1).toList();
+      final firstStart = source.start();
+      await _waitFor(() => requests == 1);
+      await source.start();
+
+      firstRequest.complete(
+        Response<ResponseBody>(
+          requestOptions: RequestOptions(path: '/events'),
+          statusCode: 200,
+          data: ResponseBody(
+            Stream.value(utf8.encode('data: stale\n\n')),
+            200,
+            headers: {
+              'content-type': ['text/event-stream'],
+            },
+          ),
+        ),
+      );
+
+      expect(await messages, [
+        const EventPack(id: '', event: '', data: 'fresh'),
+      ]);
+      await firstStart;
+      expect(requests, 2);
+
+      await source.dispose();
+    });
   });
+}
+
+Future<void> _waitFor(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 1));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for condition');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }
 
 EventSource _eventSourceFromText(String text) {
