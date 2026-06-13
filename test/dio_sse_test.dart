@@ -79,7 +79,46 @@ data:
       final message = source.onAnyMessage().first;
       await source.start();
 
-      expect(await message, const EventPack(id: '', event: '', data: ''));
+      expect(await message, const EventPack(id: '1', event: '', data: ''));
+
+      await source.dispose();
+    });
+
+    test(
+      'supports BOM, CR line endings, and discards incomplete EOF data',
+      () async {
+        final source = _eventSourceFromText(
+          '\uFEFFdata: first\rdata: second\r\rdata: discarded',
+        );
+
+        final messages = source.onAnyMessage().take(1).toList();
+        await source.start();
+
+        expect(await messages, [
+          const EventPack(id: '', event: '', data: 'first\nsecond'),
+        ]);
+
+        await source.dispose();
+      },
+    );
+
+    test('ignores id fields containing null characters', () async {
+      final source = _eventSourceFromText('''
+id: good
+data: first
+
+id: bad\u0000
+data: second
+
+''');
+
+      final messages = source.onAnyMessage().take(2).toList();
+      await source.start();
+
+      expect(await messages, [
+        const EventPack(id: 'good', event: '', data: 'first'),
+        const EventPack(id: 'good', event: '', data: 'second'),
+      ]);
 
       await source.dispose();
     });
@@ -139,6 +178,84 @@ data:
       final exception = await error;
       expect(exception.statusCode, 503);
       expect(exception.message, 'Unexpected status code: 503');
+
+      await source.dispose();
+    });
+
+    test('does not reconnect after 204 No Content', () async {
+      var requests = 0;
+      final source = EventSource(
+        options: const EventSourceOptions(
+          reconnectionInterval: Duration.zero,
+          maxReconnectionAttempts: -1,
+        ),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 204,
+                statusMessage: 'No Content',
+                data: ResponseBody.fromString('', 204),
+              );
+            },
+      );
+
+      final error = source.onError().first;
+      await source.start();
+
+      final exception = await error;
+      expect(exception.statusCode, 204);
+      expect(
+        exception.message,
+        'Server closed the event stream with 204 No Content',
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(requests, 1);
+
+      await source.dispose();
+    });
+
+    test('rejects responses without text/event-stream content type', () async {
+      var requests = 0;
+      final source = EventSource(
+        options: const EventSourceOptions(
+          reconnectionInterval: Duration.zero,
+          maxReconnectionAttempts: -1,
+        ),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 200,
+                data: ResponseBody.fromString(
+                  'data: should not parse\n\n',
+                  200,
+                  headers: {
+                    'content-type': ['text/plain'],
+                  },
+                ),
+              );
+            },
+      );
+
+      final error = source.onError().first;
+      await source.start();
+
+      final exception = await error;
+      expect(exception.statusCode, 200);
+      expect(exception.message, 'Expected Content-Type text/event-stream');
+      await Future<void>.delayed(Duration.zero);
+      expect(requests, 1);
 
       await source.dispose();
     });
@@ -220,6 +337,117 @@ data:
         const EventPack(id: '', event: '', data: '2'),
       ]);
       await _waitFor(() => requests >= 3);
+
+      await source.dispose();
+      await activeStream.close();
+    });
+
+    test('sends Last-Event-ID header when reconnecting', () async {
+      var requests = 0;
+      final requestHeaders = <Map<String, String>>[];
+      final activeStream = StreamController<Uint8List>();
+      final source = EventSource(
+        options: const EventSourceOptions(
+          reconnectionInterval: Duration.zero,
+          maxReconnectionAttempts: 1,
+        ),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              requestHeaders.add(headers);
+              if (requests == 1) {
+                return Response<ResponseBody>(
+                  requestOptions: RequestOptions(path: '/events'),
+                  statusCode: 200,
+                  data: ResponseBody(
+                    Stream.value(utf8.encode('id: 42\ndata: first\n\n')),
+                    200,
+                    headers: {
+                      'content-type': ['text/event-stream'],
+                    },
+                  ),
+                );
+              }
+
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 200,
+                data: ResponseBody(
+                  activeStream.stream,
+                  200,
+                  headers: {
+                    'content-type': ['text/event-stream'],
+                  },
+                ),
+              );
+            },
+      );
+
+      final messages = source.onAnyMessage().take(2).toList();
+      await source.start();
+      await _waitFor(() => requests == 2);
+      activeStream.add(utf8.encode('data: second\n\n'));
+
+      expect(await messages, [
+        const EventPack(id: '42', event: '', data: 'first'),
+        const EventPack(id: '', event: '', data: 'second'),
+      ]);
+      expect(requestHeaders.first, isNot(contains('Last-Event-ID')));
+      expect(requestHeaders.last['Last-Event-ID'], '42');
+
+      await source.dispose();
+      await activeStream.close();
+    });
+
+    test('updates reconnection interval from retry field', () async {
+      var requests = 0;
+      final activeStream = StreamController<Uint8List>();
+      final source = EventSource(
+        options: const EventSourceOptions(
+          reconnectionInterval: Duration(seconds: 1),
+          maxReconnectionAttempts: 1,
+        ),
+        request:
+            ({
+              required cancelToken,
+              required responseType,
+              required headers,
+            }) async {
+              requests++;
+              if (requests == 1) {
+                return Response<ResponseBody>(
+                  requestOptions: RequestOptions(path: '/events'),
+                  statusCode: 200,
+                  data: ResponseBody(
+                    Stream.value(utf8.encode('retry: 0\n\n')),
+                    200,
+                    headers: {
+                      'content-type': ['text/event-stream'],
+                    },
+                  ),
+                );
+              }
+
+              return Response<ResponseBody>(
+                requestOptions: RequestOptions(path: '/events'),
+                statusCode: 200,
+                data: ResponseBody(
+                  activeStream.stream,
+                  200,
+                  headers: {
+                    'content-type': ['text/event-stream'],
+                  },
+                ),
+              );
+            },
+      );
+
+      await source.start();
+      await _waitFor(() => requests == 2);
 
       await source.dispose();
       await activeStream.close();

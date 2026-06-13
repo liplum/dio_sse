@@ -9,14 +9,13 @@ import 'error.dart';
 import 'pack.dart';
 
 class _EventPackBuilder {
-  String id = "";
   String event = "";
   String data = "";
   bool hasData = false;
 
   bool get shouldDispatch => hasData;
 
-  EventPack build() {
+  EventPack build(String id) {
     final normalizedData = data.endsWith('\n')
         ? data.substring(0, data.length - 1)
         : data;
@@ -60,11 +59,53 @@ typedef EventSourceRequest =
       required Map<String, String> headers,
     });
 
+final _asciiDigitsRegex = RegExp(r'^[0-9]+$');
+
 final _uint8Transformer = StreamTransformer<Uint8List, List<int>>.fromHandlers(
   handleData: (data, sink) {
     sink.add(data);
   },
 );
+
+StreamTransformer<String, String> _sseLineSplitter() {
+  final buffer = StringBuffer();
+  var bomStripped = false;
+  var discardNextLf = false;
+
+  return StreamTransformer<String, String>.fromHandlers(
+    handleData: (chunk, sink) {
+      var text = chunk;
+      if (!bomStripped) {
+        if (text.isEmpty) return;
+        bomStripped = true;
+        if (text.startsWith('\uFEFF')) {
+          text = text.substring(1);
+        }
+      }
+
+      for (var i = 0; i < text.length; i++) {
+        final codeUnit = text.codeUnitAt(i);
+        if (discardNextLf) {
+          discardNextLf = false;
+          if (codeUnit == 0x0A) {
+            continue;
+          }
+        }
+
+        if (codeUnit == 0x0D) {
+          sink.add(buffer.toString());
+          buffer.clear();
+          discardNextLf = true;
+        } else if (codeUnit == 0x0A) {
+          sink.add(buffer.toString());
+          buffer.clear();
+        } else {
+          buffer.writeCharCode(codeUnit);
+        }
+      }
+    },
+  );
+}
 
 const _sseHeaders = {
   "Accept": "text/event-stream",
@@ -80,13 +121,15 @@ class EventSource {
   bool _disposed = false;
   StreamSubscription? _streamSubscription;
   int _reconnectionAttempts = 0;
+  String _lastEventId = '';
+  Duration _reconnectionInterval;
 
   bool get connected => _connected;
 
   EventSource({
     required this.request,
     this.options = const EventSourceOptions(),
-  });
+  }) : _reconnectionInterval = options.reconnectionInterval;
 
   CancelToken? _cancelToken;
 
@@ -160,33 +203,44 @@ class EventSource {
       final response = await request(
         cancelToken: cancelToken,
         responseType: ResponseType.stream,
-        headers: _sseHeaders,
+        headers: _requestHeaders,
       );
       if (_disposed || _cancelToken != cancelToken || cancelToken.isCancelled) {
         return;
       }
       if (response.statusCode != null && response.statusCode != 200) {
-        _addException(
+        await _failConnection(
           EventSourceException(
             statusCode: response.statusCode,
             reason: response.statusMessage,
-            message: 'Unexpected status code: ${response.statusCode}',
+            message: response.statusCode == 204
+                ? 'Server closed the event stream with 204 No Content'
+                : 'Unexpected status code: ${response.statusCode}',
           ),
         );
-        await _stop();
-        await _attemptReconnectIfNeeded();
+        return;
+      }
+      final data = response.data;
+      final body = data as ResponseBody;
+      if (!_hasEventStreamContentType(response, body)) {
+        await _failConnection(
+          EventSourceException(
+            statusCode: response.statusCode,
+            reason: response.statusMessage,
+            message: 'Expected Content-Type text/event-stream',
+          ),
+        );
         return;
       }
       _log(_LogCat.info, 'Connected: ${response.statusCode.toString()}');
-      final data = response.data;
-      final body = data as ResponseBody;
       _connected = true;
 
       var curPack = _EventPackBuilder();
+      var lastEventIdBuffer = '';
       _streamSubscription = body.stream
           .transform(_uint8Transformer)
           .transform(const Utf8Decoder())
-          .transform(const LineSplitter())
+          .transform(_sseLineSplitter())
           .listen(
             (dataLine) {
               if (_disposed) return;
@@ -194,8 +248,9 @@ class EventSource {
               if (dataLine.isEmpty) {
                 /// When the data line is empty, it indicates that the complete event set has been read.
                 /// The event is then added to the stream.
+                _lastEventId = lastEventIdBuffer;
                 if (curPack.shouldDispatch) {
-                  final pack = curPack.build();
+                  final pack = curPack.build(_lastEventId);
                   _addMessage(pack);
                   if (options.logReceivedData) {
                     _log(_LogCat.info, pack.data);
@@ -227,9 +282,16 @@ class EventSource {
                   curPack.data = '${curPack.data}$value\n';
                   break;
                 case 'id':
-                  curPack.id = value;
+                  if (!value.contains('\u0000')) {
+                    lastEventIdBuffer = value;
+                  }
                   break;
                 case 'retry':
+                  if (_asciiDigitsRegex.hasMatch(value)) {
+                    _reconnectionInterval = Duration(
+                      milliseconds: int.parse(value),
+                    );
+                  }
                   break;
               }
             },
@@ -272,15 +334,19 @@ class EventSource {
       _connected = false;
       if (error is DioException) {
         final data = error.response?.data;
-        _addException(
-          EventSourceException(
-            error: error,
-            statusCode: error.response?.statusCode,
-            reason: error.response?.statusMessage,
-            message:
-                "${data is ResponseBody ? await _streamToString(data.stream) : data}",
-          ),
+        final exception = EventSourceException(
+          error: error,
+          statusCode: error.response?.statusCode,
+          reason: error.response?.statusMessage,
+          message:
+              "${data is ResponseBody ? await _streamToString(data.stream) : data}",
         );
+        _addException(exception);
+        await _stop();
+        if (error.response == null) {
+          await _attemptReconnectIfNeeded();
+        }
+        return;
       } else {
         _addException(
           EventSourceException(error: error, message: error.toString()),
@@ -291,6 +357,11 @@ class EventSource {
     }
   }
 
+  Map<String, String> get _requestHeaders {
+    if (_lastEventId.isEmpty) return {..._sseHeaders};
+    return {..._sseHeaders, 'Last-Event-ID': _lastEventId};
+  }
+
   void _addException(EventSourceException exception) {
     if (_disposed) return;
     _errors.add(exception);
@@ -299,6 +370,11 @@ class EventSource {
   void _addMessage(EventPack pack) {
     if (_disposed) return;
     _messages.add(pack);
+  }
+
+  Future<void> _failConnection(EventSourceException exception) async {
+    _addException(exception);
+    await _stop();
   }
 
   Future<void> dispose() async {
@@ -348,11 +424,11 @@ class EventSource {
 
     _log(
       _LogCat.reconnect,
-      "Trying again in ${options.reconnectionInterval.toString()} seconds",
+      "Trying again in ${_reconnectionInterval.toString()} seconds",
     );
 
     /// It waits for the specified constant interval before attempting to reconnect.
-    await Future.delayed(options.reconnectionInterval);
+    await Future.delayed(_reconnectionInterval);
     if (!connected) {
       await _start(isReconnection: true);
     }
@@ -395,4 +471,15 @@ Future<String> _streamToString(Stream<Uint8List> stream) async {
   } catch (_) {
     return "";
   }
+}
+
+bool _hasEventStreamContentType(Response response, ResponseBody body) {
+  final contentType =
+      response.headers.value(Headers.contentTypeHeader) ??
+      body.headers[Headers.contentTypeHeader]?.join(',') ??
+      body.headers[Headers.contentTypeHeader.toLowerCase()]?.join(',');
+  if (contentType == null) return false;
+
+  return contentType.split(';').first.trim().toLowerCase() ==
+      'text/event-stream';
 }
