@@ -1,16 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
-import 'dart:developer';
 
-import '../dio_sse.dart';
+import 'error.dart';
+import 'pack.dart';
 
 class _EventPackBuilder {
   String id = "";
   String event = "";
   String data = "";
+
+  bool get hasContent => id.isNotEmpty || event.isNotEmpty || data.isNotEmpty;
 
   EventPack build() => EventPack(id: id, event: event, data: data);
 }
@@ -28,14 +31,12 @@ enum _LogCat {
 
 final _lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
 
-/// Reconnect configuration for the client.
-/// Reconnect config takes three parameters:
-/// - interval: Duration, the time interval between reconnection attempts. If mode is linear, the interval is fixed.
-/// If mode is exponential, the interval is multiplied by 2 after each attempt.
-/// - maxAttempts: int, the maximum number of reconnection attempts.
-/// - onReconnect: Function, a callback function that is called when the client reconnects.
+/// Reconnection and logging options for [EventSource].
 class EventSourceOptions {
+  /// Whether received event data should be logged with `dart:developer`.
   final bool logReceivedData;
+
+  /// Delay before each reconnect attempt.
   final Duration reconnectionInterval;
 
   /// -1 means unlimited.
@@ -48,11 +49,12 @@ class EventSourceOptions {
   });
 }
 
-StreamTransformer<Uint8List, List<int>> _unit8Transformer = StreamTransformer.fromHandlers(
-  handleData: (data, sink) {
-    sink.add(List<int>.from(data));
-  },
-);
+StreamTransformer<Uint8List, List<int>> _unit8Transformer =
+    StreamTransformer.fromHandlers(
+      handleData: (data, sink) {
+        sink.add(List<int>.from(data));
+      },
+    );
 
 typedef EventSourceRequest =
     Future<Response> Function({
@@ -61,7 +63,10 @@ typedef EventSourceRequest =
       required Map<String, String> headers,
     });
 
-const _sseHeaders = {"Accept": "text/event-stream", "Cache-Control": "no-cache"};
+const _sseHeaders = {
+  "Accept": "text/event-stream",
+  "Cache-Control": "no-cache",
+};
 
 class EventSource {
   final _messages = StreamController<EventPack>.broadcast();
@@ -75,7 +80,10 @@ class EventSource {
 
   bool get connected => _connected;
 
-  EventSource({required this.request, this.options = const EventSourceOptions()});
+  EventSource({
+    required this.request,
+    this.options = const EventSourceOptions(),
+  });
 
   CancelToken? _cancelToken;
 
@@ -116,7 +124,13 @@ class EventSource {
   }) {
     return EventSource(
       options: sseOptions,
-      request: toCallback(dio, url: url, options: options, queryParameters: queryParameters, data: data),
+      request: toCallback(
+        dio,
+        url: url,
+        options: options,
+        queryParameters: queryParameters,
+        data: data,
+      ),
     );
   }
 
@@ -139,7 +153,11 @@ class EventSource {
     cancelToken = _cancelToken = CancelToken();
     _log(_LogCat.info, 'Connection Initiated');
     try {
-      final response = await request(cancelToken: cancelToken, responseType: ResponseType.stream, headers: _sseHeaders);
+      final response = await request(
+        cancelToken: cancelToken,
+        responseType: ResponseType.stream,
+        headers: _sseHeaders,
+      );
       _log(_LogCat.info, 'Connected: ${response.statusCode.toString()}');
       final data = response.data;
       final body = data as ResponseBody;
@@ -155,9 +173,11 @@ class EventSource {
               if (dataLine.isEmpty) {
                 /// When the data line is empty, it indicates that the complete event set has been read.
                 /// The event is then added to the stream.
-                _messages.add(curPack.build());
-                if (options.logReceivedData) {
-                  _log(_LogCat.info, curPack.data.toString());
+                if (curPack.hasContent) {
+                  _messages.add(curPack.build());
+                  if (options.logReceivedData) {
+                    _log(_LogCat.info, curPack.data.toString());
+                  }
                 }
                 curPack = _EventPackBuilder();
                 return;
@@ -171,8 +191,7 @@ class EventSource {
               }
               var value = '';
               if (field == 'data') {
-                /// If the field is data, we get the data through the substring
-                value = dataLine.substring(5);
+                value = match.group(2) ?? '';
               } else {
                 value = match.group(2) ?? '';
               }
@@ -199,7 +218,10 @@ class EventSource {
               await _attemptReconnectIfNeeded();
             },
             onError: (error, stackTrace) async {
-              _log(_LogCat.error, 'Data Stream Listen Error: ${response.statusCode}: $error ');
+              _log(
+                _LogCat.error,
+                'Data Stream Listen Error: ${response.statusCode}: $error ',
+              );
               await _stop();
 
               /// Executes the onError function if it is not null
@@ -224,11 +246,14 @@ class EventSource {
             error: error,
             statusCode: error.response?.statusCode,
             reason: error.response?.statusMessage,
-            message: "${data is ResponseBody ? await _streamToString(data.stream) : data}",
+            message:
+                "${data is ResponseBody ? await _streamToString(data.stream) : data}",
           ),
         );
       } else {
-        _addException(EventSourceException(error: error, message: error.toString()));
+        _addException(
+          EventSourceException(error: error, message: error.toString()),
+        );
       }
       await _stop();
       await _attemptReconnectIfNeeded();
@@ -285,7 +310,10 @@ class EventSource {
 
     // If a reconnectHeader is provided, it is executed to get the header.
 
-    _log(_LogCat.reconnect, "Trying again in ${options.reconnectionInterval.toString()} seconds");
+    _log(
+      _LogCat.reconnect,
+      "Trying again in ${options.reconnectionInterval.toString()} seconds",
+    );
 
     /// It waits for the specified constant interval before attempting to reconnect.
     await Future.delayed(options.reconnectionInterval);
@@ -321,10 +349,12 @@ class EventSource {
 }
 
 Future<String> _streamToString(Stream<Uint8List> stream) async {
-  if (await stream.isEmpty) return "";
   try {
-    final bytes = await stream.reduce((value, element) => Uint8List.fromList([...value, ...element]));
-    return utf8.decode(bytes);
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in stream) {
+      bytes.add(chunk);
+    }
+    return utf8.decode(bytes.takeBytes());
   } catch (_) {
     return "";
   }

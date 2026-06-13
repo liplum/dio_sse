@@ -1,14 +1,18 @@
 name: dio_sse
-description: A dio transformer for Server-Sent Events(SSE). It can transform a SSE stream into a series of dio Responses.
+description: Consume Server-Sent Events streams with Dio, including event filtering, error streams, and configurable reconnection.
 version: 2.1.0
 repository: https://github.com/liplum/dio_sse
+topics:
+  - dio
+  - sse
+  - server-sent-events
+  - http
 
 environment:
   sdk: ^3.9.0
 
 dependencies:
   dio: ^5.9.0
-  web: ^1.1.1
 
 dev_dependencies:
   lints: ^6.0.0

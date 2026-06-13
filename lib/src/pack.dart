@@ -12,8 +12,11 @@ class EventPack {
 
   Map<String, dynamic> toJson() => {'id': id, 'event': event, 'data': data};
 
-  factory EventPack.fromJson(Map<String, dynamic> json) =>
-      EventPack(id: json['id'] as String, event: json['event'] as String, data: json['data'] as String);
+  factory EventPack.fromJson(Map<String, dynamic> json) => EventPack(
+    id: json['id'] as String,
+    event: json['event'] as String,
+    data: json['data'] as String,
+  );
 
   @override
   bool operator ==(Object other) {

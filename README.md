@@ -1,40 +1,66 @@
-This package provides a simple and efficient way to consume Server-Sent Events (SSE) in your Dart
-and Flutter applications.
+# dio_sse
 
-It leverages the powerful `dio` HTTP client for network requests and
-offers a streamlined API for handling SSE streams.
+Consume Server-Sent Events (SSE) streams with
+[`dio`](https://pub.dev/packages/dio) in Dart and Flutter applications.
 
 ## Features
 
-* **Easy Integration:** Seamlessly integrates with existing `dio` instances.
-* **Automatic Reconnection:** Handles network interruptions and attempts to reconnect
-  automatically (configurable).
-* **Event Filtering:** Listen to specific event types or all events.
-* **Error Handling:** Provides mechanisms for handling connection errors and stream errors.
-* **Graceful Shutdown:** Allows for proper disposal of resources.
-* **Customizable Headers:** Easily add custom headers to your SSE requests.
+- Integrates with an existing `Dio` instance.
+- Adds SSE headers automatically.
+- Supports configurable reconnection attempts and delay.
+- Exposes streams for default messages, named events, all events, and errors.
+- Allows normal Dio options, query parameters, and request bodies.
 
 ## Getting started
 
-1. **Add Dependency:**
+Add the package to your `pubspec.yaml`:
 
-   Add `dio_sse` to your `pubspec.yaml` file:
+```yaml
+dependencies:
+  dio_sse: ^2.1.0
+```
+
+Then create an `EventSource` from a `Dio` instance:
 
 ```dart
+import 'package:dio/dio.dart';
+import 'package:dio_sse/dio_sse.dart';
+
 Future<void> main() async {
   final dio = Dio();
-  final sse = EventSource.from(dio, url: "https://sse.dev/test");
-  sse.start();
-  sse.onAnyMessage().listen((event) {
-    print(event);
+  final events = EventSource.from(dio, url: 'https://sse.dev/test');
+
+  events.onAnyMessage().listen((event) {
+    print(event.data);
   });
-  await Future.delayed(Duration(milliseconds: 10000));
-  await sse.dispose();
+
+  events.onError().listen((error) {
+    print(error.message);
+  });
+
+  await events.start();
+  await Future<void>.delayed(const Duration(seconds: 10));
+  await events.dispose();
 }
 ```
 
-## Publishing
+## Listening to named events
 
-```shell
-TAG="v1.0.0" && git push origin --delete $TAG || true && git tag -f $TAG && git push origin $TAG
+```dart
+events.on('notification').listen((event) {
+  print(event.data);
+});
+```
+
+## Reconnection
+
+```dart
+final events = EventSource.from(
+  dio,
+  url: 'https://example.com/events',
+  sseOptions: const EventSourceOptions(
+    reconnectionInterval: Duration(seconds: 5),
+    maxReconnectionAttempts: 3,
+  ),
+);
 ```
